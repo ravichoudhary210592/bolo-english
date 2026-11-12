@@ -296,3 +296,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .meet span { position: absolute; right: -8px; bottom: -4px; font-size: 30px; background: var(--card); border-radius: 50%; width: 46px; height: 46px; display: grid; place-items: center; box-shadow: var(--shadow); }
 .peek { align-self: flex-end; font-size: 12.5px; font-weight: 600; color: var(--muted); margin: -4px 6px 2px 0; padding: 2px 4px; }
 .o-face { flex: none; }
+
+/* Live talk */
+.stage.live { padding: 14px 0 12px; gap: 6px; }
+.stage-face { display: block; border-radius: 50%; }
+.stage-status { font-size: 13.5px; color: var(--muted); min-height: 19px; text-align: center; padding: 0 16px; }
+.live-wave { display: flex; align-items: center; justify-content: center; gap: 5px; width: 110px; height: 44px; }
+.live-wave i { display: block; width: 6px; height: 6px; border-radius: 3px; background: var(--good); transition: height .09s linear; }
+.side-btn.end { background: var(--bad); color: #fff; }
+.side-btn.off { background: var(--bad-soft); color: var(--bad); }
