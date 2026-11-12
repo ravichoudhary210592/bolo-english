@@ -1,5 +1,5 @@
 // Speech-to-text worker: Whisper running on the device (WebAssembly). Audio never leaves the phone.
-import { pipeline, env } from '../vendor/transformers.min.js';
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js';
 
 env.allowLocalModels = false;
 // One thread: measured faster than four for this model, and it needs no special server headers.
