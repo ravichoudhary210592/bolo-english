@@ -5,7 +5,9 @@ import { UPGRADES } from './data/content.js';
 import { stt, llm, speak, englishVoices, removePack, STT_MODELS, LLM_MODELS } from './speech.js';
 import { $, esc, I, push, sheet, toast, confirmSheet, speechSetup, ringHTML, fmtMin, refreshRoot, micDock } from './ui.js';
 import { coach, faceSVG, liveFace } from './avatar.js';
-import { openScenario, scenarioOfDay, planFlag, aiSetup, openTopic } from './speak.js';
+import { openScenario, scenarioOfDay, planFlag, aiSetup, openTopic, talkTo, twoMinutes } from './speak.js';
+import { hasKey, keySheet } from './live.js';
+import { ACCENTS } from './avatar.js';
 import { startShadow, flashcards, ALLWORDS } from './practice.js';
 import { TOPICS } from './data/content.js';
 
@@ -32,10 +34,11 @@ export function homeTab(page) {
   page.el.innerHTML = `<div class="scroll">
     <div class="big-title"><div><div class="sub">${new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</div><h1>Let's talk</h1></div><button class="icon-btn" data-act="settings" aria-label="Settings" style="background:var(--card);box-shadow:var(--shadow)">${I.gear}</button></div>
     ${!stt.installed ? `<button class="banner tap" data-act="setup"><div class="badge">${I.down}</div><div class="grow"><div class="t">Let me hear you</div><div class="d">One-time ${STT_MODELS[S.settings.sttModel].size} download so we can talk without internet.</div></div><span class="chev">${I.chev}</span></button>` : ''}
+    ${stt.installed && !hasKey() ? `<button class="banner tap" data-act="key"><div class="badge">${I.spark}</div><div class="grow"><div class="t">Make ${esc(maya.name)} sound human</div><div class="d">Turn on live talk: a natural voice that answers at once. Free Google key, needs internet.</div></div><span class="chev">${I.chev}</span></button>` : ''}
     ${isIOS && !standalone() ? `<button class="banner tap w" data-act="install"><div class="badge w">${I.home}</div><div class="grow"><div class="t">Add to Home Screen</div><div class="d">Runs full screen like an app and keeps your data safe.</div></div><span class="chev">${I.chev}</span></button>` : ''}
     <div class="card coach"><div class="row" style="align-items:flex-start"><div class="coach-face">${faceSVG(maya, 68)}</div>
       <div class="grow"><div class="tiny b muted">${esc(maya.name)}</div><div class="coach-say">${hello}${S.profile.name ? ', ' + esc(S.profile.name) : ''}! ${line}</div></div></div>
-      <div class="gap"></div><button class="btn" data-act="task" data-k="${plan.rp ? 'free' : 'rp'}">${I.mic} Let's talk</button></div>
+      <div class="gap"></div><div class="btns"><button class="btn" data-act="call">${I.mic} Let's talk</button><button class="btn soft" data-act="two">${I.clock} 2 minutes</button></div></div>
     <div class="gap"></div>
     <div class="hero"><div class="row">
       ${ringHTML(d.sec / goal, Math.floor(d.sec / 60), 'of ' + S.profile.goal + ' min')}
@@ -47,7 +50,8 @@ export function homeTab(page) {
     <div class="sec"><h3>Or pick a mood</h3></div>
     <div class="hscroll">
       <button class="tile tap" data-act="ai"><div class="badge">${I.spark}</div><div><div class="t">Just chat</div><div class="d">Talk about anything</div></div></button>
-      <button class="tile tap" data-act="topic"><div class="badge w">${I.clock}</div><div><div class="t">Tell me about…</div><div class="d">A surprise topic</div></div></button>
+      <button class="tile tap" data-act="two"><div class="badge w">${I.clock}</div><div><div class="t">2-minute challenge</div><div class="d">Keep talking, no stopping</div></div></button>
+      <button class="tile tap" data-act="topic"><div class="badge">${I.bulb}</div><div><div class="t">Tell me about…</div><div class="d">A surprise topic</div></div></button>
       <button class="tile tap" data-act="interview"><div class="badge g">💼</div><div><div class="t">Interview me</div><div class="d">Practise the big one</div></div></button>
       <button class="tile tap" data-act="smalltalk"><div class="badge r">☕</div><div><div class="t">Small talk</div><div class="d">Easy, friendly chat</div></div></button>
     </div>
@@ -58,6 +62,9 @@ export function homeTab(page) {
   const find = re => (SCENARIOS.find(s => re.test(s.id) || re.test(s.title)) || SCENARIOS[0]).id;
   page.on({
     settings: () => settingsPage(),
+    key: () => keySheet(() => refreshRoot()),
+    call: () => (hasKey() ? talkTo(null) : plan.rp ? page.handlers.ai() : openScenario(sod.id)),
+    two: () => twoMinutes(),
     setup: () => speechSetup(() => refreshRoot()),
     install: () => installSheet(),
     task: b => { const k = b.dataset.k; if (k === 'free') page.handlers.ai(); else if (k === 'rp') openScenario(sod.id); else if (k === 'sh') startShadow(S.profile.level === 'C1' ? 'C1' : S.profile.level === 'B1' ? 'B1' : 'B2'); else if (due) flashcards(); else document.querySelector('.tab[data-tab="words"]').click(); },
@@ -120,12 +127,21 @@ function settingsPage() {
         <div class="card"><label class="field" style="margin-top:0"><span>Name</span><input id="s-name" value="${esc(S.profile.name)}" placeholder="Your name" autocomplete="off"></label>
           <label class="field"><span>Level</span><select id="s-level">${[['B1', 'Intermediate (B1)'], ['B2', 'Upper intermediate (B2)'], ['C1', 'Advanced (C1)']].map(([v, l]) => `<option value="${v}" ${S.profile.level === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
           <label class="field"><span>Daily speaking goal</span><select id="s-goal">${[5, 10, 15, 20, 30].map(g => `<option value="${g}" ${S.profile.goal === g ? 'selected' : ''}>${g} minutes</option>`).join('')}</select></label></div>
+        <div class="sec"><h3>Your partner</h3></div>
+        <div class="card"><div class="tiny b muted" style="margin:0 4px 6px">ACCENT</div><div class="seg" style="margin-bottom:12px">${Object.entries(ACCENTS).map(([k, a]) => `<button class="${S.settings.accent === k ? 'on' : ''}" data-act="acc" data-v="${k}">${a.label}</button>`).join('')}</div>
+          <div class="tiny b muted" style="margin:0 4px 6px">VOICE</div><div class="seg" style="margin:0">${[['any', 'Either'], ['f', 'Woman'], ['m', 'Man']].map(([k, l]) => `<button class="${(S.settings.partner || 'any') === k ? 'on' : ''}" data-act="gender" data-v="${k}">${l}</button>`).join('')}</div></div>
+        <div class="sec"><h3>Live talk</h3></div>
+        <div class="card"><div class="row"><div class="badge ${hasKey() ? 'g' : ''}">${I.spark}</div><div class="grow"><div class="b">Human-voice partner</div><div class="small muted">${hasKey() ? 'On · key saved on this iPhone' : 'Off · needs a free Google key'}</div></div>
+          ${hasKey() ? `<button class="btn danger sm" data-act="rm-key">Remove</button>` : `<button class="btn sm" data-act="add-key">Turn on</button>`}</div>
+          <label class="field"><span>Reply after I pause for</span><select id="s-lpause">${[1.5, 2.5, 4, 5].map(v => `<option value="${v}" ${(S.settings.livePause || 2.5) === v ? 'selected' : ''}>${v} seconds</option>`).join('')}</select></label>
+          <p class="muted tiny" style="margin-top:10px">Live talk needs internet and sends your voice to Google to be understood and answered. A shorter pause feels quicker; a longer one gives you time to think mid-sentence.</p></div>
         <div class="sec"><h3>Voice</h3></div>
         <div class="card"><label class="field" style="margin-top:0"><span>Partner voice</span><select id="s-voice"><option value="">Automatic</option>${voices.map(v => `<option value="${esc(v.voiceURI)}" ${S.settings.voice === v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select></label>
           <label class="field"><span>Speed · <b id="s-rate-l">${S.settings.rate.toFixed(2)}×</b></span><input id="s-rate" type="range" min="0.7" max="1.2" step="0.05" value="${S.settings.rate}"></label>
           <div class="gap"></div><button class="btn soft sm" data-act="test" style="width:100%">${I.speaker} Test voice</button>
           <p class="muted tiny" style="margin-top:10px">For voices that sound like real people, download a “Premium” or “Enhanced” English voice (one female, one male) in iPhone Settings → Accessibility → Spoken Content → Voices → English. The app picks them up automatically and matches each partner's face to a voice.</p></div>
         <div class="gap"></div>
+        <div class="card"><label class="field" style="margin-top:0"><span>In offline practice, take my answer after a pause of</span><select id="s-pause">${[2, 3, 4, 5].map(v => `<option value="${v}" ${(S.settings.pause || 4) === v ? 'selected' : ''}>${v} seconds</option>`).join('')}</select></label></div><div class="gap"></div>
         <div class="list"><div class="item plain"><div class="grow"><div class="t">Hands-free conversation</div><div class="d">The mic opens when your partner stops and closes when you pause</div></div>${sw('handsFree', S.settings.handsFree)}</div>
           <div class="item plain"><div class="grow"><div class="t">Coach me after every answer</div><div class="d">Off: tips wait until the conversation ends, so it flows naturally</div></div>${sw('coachEach', S.settings.coachEach)}</div>
           <div class="item plain"><div class="grow"><div class="t">Partner speaks aloud</div></div>${sw('autoSpeak', S.settings.autoSpeak)}</div>
@@ -148,6 +164,8 @@ function settingsPage() {
       bind('#s-level', v => { S.profile.level = v; });
       bind('#s-goal', v => { S.profile.goal = +v; });
       bind('#s-voice', v => { S.settings.voice = v; });
+      bind('#s-lpause', v => { S.settings.livePause = +v; });
+      bind('#s-pause', v => { S.settings.pause = +v; });
       bind('#s-stt', v => { S.settings.sttModel = v; stt.loaded = false; draw(); });
       bind('#s-llm', v => { S.settings.llmModel = v; llm.unload(); draw(); });
       page.$('#s-rate').addEventListener('input', e => { S.settings.rate = +e.target.value; page.$('#s-rate-l').textContent = S.settings.rate.toFixed(2) + '×'; save(); });
@@ -155,6 +173,10 @@ function settingsPage() {
     draw();
     page.on({
       toggle: b => { const k = b.dataset.k; S.settings[k] = !S.settings[k]; b.classList.toggle('on', S.settings[k]); save(); },
+      acc: b => { S.settings.accent = b.dataset.v; save(); draw(); },
+      gender: b => { S.settings.partner = b.dataset.v; save(); draw(); },
+      'add-key': () => keySheet(draw),
+      'rm-key': async () => { if (await confirmSheet('Turn off live talk?', 'The key is deleted from this iPhone. Conversations go back to the offline partner.', 'Remove key', true)) { S.settings.geminiKey = ''; save(); draw(); } },
       test: () => speak("Hi, it's " + coach().name + ". So, what shall we talk about today?", { gender: coach().g }),
       'get-stt': () => speechSetup(draw),
       'get-llm': () => aiSetup(draw),
