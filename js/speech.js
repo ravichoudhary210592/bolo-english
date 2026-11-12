@@ -27,12 +27,15 @@ function pickVoice(gender) {
   if (!list.length) return null;
   const chosen = list.find(v => v.voiceURI === S.settings.voice);
   if (chosen) return chosen;
+  // Prefer a voice in the accent the learner chose (Indian, British or Australian English).
+  const want = { in: /^en[-_]IN/i, uk: /^en[-_]GB/i, au: /^en[-_]AU/i }[S.settings.accent || 'in'];
+  if (want) { const local = list.filter(v => want.test(v.lang)); if (local.length) list = local; }
   if (gender) { const same = list.filter(v => voiceGender(v) === gender); if (same.length) list = same; }
   // The downloadable Premium / Enhanced iPhone voices sound far more human than the compact defaults.
   const human = list.find(v => /premium/i.test(v.name + v.voiceURI)) || list.find(v => /enhanced/i.test(v.name + v.voiceURI)) || list.find(v => /natural|neural/i.test(v.name));
   if (human) return human;
-  const pref = gender === 'm' ? ['Daniel', 'Aaron', 'Arthur', 'Alex', 'Rishi', 'Microsoft David', 'Microsoft Mark', 'Google UK English Male']
-    : ['Samantha', 'Ava', 'Karen', 'Allison', 'Google US English', 'Microsoft Aria', 'Microsoft Zira'];
+  const pref = gender === 'm' ? ['Rishi', 'Daniel', 'Lee', 'Aaron', 'Arthur', 'Alex', 'Rishi', 'Microsoft David', 'Microsoft Mark', 'Google UK English Male']
+    : ['Isha', 'Veena', 'Kate', 'Serena', 'Karen', 'Samantha', 'Ava', 'Allison', 'Google US English', 'Microsoft Aria', 'Microsoft Zira'];
   for (const p of pref) { const v = list.find(x => x.name.includes(p)); if (v) return v; }
   return list.find(v => /en[-_]US/i.test(v.lang)) || list[0];
 }
@@ -60,18 +63,29 @@ export function speak(text, opts = {}) {
   });
 }
 
+/* ---------- One microphone for the whole session ---------- */
+// iPhone asks for permission every time a page opens the mic. So open it once and keep it:
+// the question appears at most once per launch instead of before every answer.
+let micStream = null, micPending = null;
+export function getMic() {
+  if (micStream && micStream.getAudioTracks().some(t => t.readyState === 'live')) return Promise.resolve(micStream);
+  if (micPending) return micPending;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.reject(new Error('Microphone is not available in this browser.'));
+  micPending = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+    .then(st => { micStream = st; return st; }).finally(() => { micPending = null; });
+  return micPending;
+}
+
 /* ---------- Microphone capture as 16 kHz PCM ---------- */
 export class Recorder {
-  constructor() { this.level = 0; this.chunks = []; this.active = false; }
+  constructor() { this.level = 0; this.noise = 0.02; this.talking = false; this.chunks = []; this.active = false; }
   async start() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Microphone is not available in this browser.');
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    this.stream = await getMic();
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC();
     if (this.ctx.state === 'suspended') {
       await Promise.race([this.ctx.resume(), new Promise(r => setTimeout(r, 600))]);
       if (this.ctx.state !== 'running') { // iOS refuses audio that was not started by a tap
-        this.stream.getTracks().forEach(t => t.stop());
         try { this.ctx.close(); } catch (e) { /* ignore */ }
         throw new Error('needs-tap');
       }
@@ -85,7 +99,11 @@ export class Recorder {
       this.chunks.push(new Float32Array(d));
       let s = 0;
       for (let i = 0; i < d.length; i += 8) s += d[i] * d[i];
-      this.level = Math.min(1, Math.sqrt(s / (d.length / 8)) * 6);
+      const raw = Math.sqrt(s / (d.length / 8));
+      this.level = Math.min(1, raw * 6);
+      // Adaptive voice detection: follow the room's background noise and call it speech only when clearly above it.
+      this.noise = raw < this.noise ? raw * 0.5 + this.noise * 0.5 : this.noise * 0.995 + raw * 0.005;
+      this.talking = raw > Math.max(0.012, this.noise * 2.6);
     };
     const mute = this.ctx.createGain();
     mute.gain.value = 0;
@@ -101,7 +119,6 @@ export class Recorder {
     this.active = false;
     const duration = (performance.now() - this.started) / 1000;
     try { this.node.disconnect(); this.src.disconnect(); } catch (e) { /* ignore */ }
-    this.stream.getTracks().forEach(t => t.stop());
     try { await this.ctx.close(); } catch (e) { /* ignore */ }
     let len = 0;
     for (const c of this.chunks) len += c.length;
