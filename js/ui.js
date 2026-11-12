@@ -253,14 +253,18 @@ export function micDock(page, opts) {
     if (state !== 'rec') return;
     pulse.style.transform = `scale(${1 + rec.level * 0.75})`;
     const t = rec.elapsed();
-    hintEl.textContent = opts.autoStop ? (heardAt ? 'Listening… pause when you finish' : 'Your turn — go ahead') : `Listening… ${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} · tap to finish`;
+    // Nobody has to press a button to finish: after a few seconds without speech the answer is taken.
+    const gap = S.settings.pause || 4;
+    if (rec.talking) { if (!heardAt) heardAt = t; quietAt = 0; } else if (!quietAt) quietAt = t;
+    const quiet = quietAt ? t - quietAt : 0;
+    const early = opts.minSec && t < opts.minSec; // e.g. a 2-minute talk: silence does not end it early
+    const clock = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+    hintEl.textContent = !heardAt ? 'Go ahead — I am listening' : early && quiet > gap ? (opts.nudge ? opts.nudge(t) : 'Keep going…') + ' · ' + clock : quiet > 1.5 ? `Finishing in ${Math.max(1, Math.ceil(gap - quiet))}… keep talking to continue` : 'Listening… ' + clock;
     if (opts.onTick) opts.onTick(t);
     if (t >= maxSec) return finish();
-    if (opts.autoStop) {
-      if (rec.level > 0.16) { if (!heardAt) heardAt = t; quietAt = 0; }
-      else if (rec.level < 0.08) { if (!quietAt) quietAt = t; }
-      if (heardAt && quietAt && t - quietAt > 1.9 && t - heardAt > 1.2) return finish();
-      if (!heardAt && auto && t > 9) { cancelAnimationFrame(raf); rec.cancel(); setState('idle'); hintEl.textContent = 'Tap the mic when you are ready'; return; }
+    if (opts.autoStop !== false) {
+      if (heardAt && !early && quiet > gap) return finish();
+      if (!heardAt && t > 12) { cancelAnimationFrame(raf); rec.cancel(); setState('idle'); hintEl.textContent = 'Tap the mic when you are ready'; return; }
     }
     raf = requestAnimationFrame(tick);
   }
