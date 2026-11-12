@@ -1,5 +1,5 @@
 // On-device AI conversation partner: a small language model running on the phone's GPU (WebGPU).
-import { pipeline, env, TextStreamer } from '../vendor/transformers.min.js';
+import { pipeline, env, TextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js';
 
 env.allowLocalModels = false;
 
