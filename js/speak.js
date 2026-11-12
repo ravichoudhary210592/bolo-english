@@ -5,6 +5,7 @@ import { TOPICS } from './data/content.js';
 import { llm, LLM_MODELS, speak, stopSpeaking } from './speech.js';
 import { $, $$, esc, I, push, pop, replace, sheet, toast, micDock, analyse, feedbackHTML, sampleHTML, issuesHTML, playBlob, mb, fmtMin } from './ui.js';
 import { conversation } from './talk.js';
+import { liveTalk, liveReady, hasKey, keySheet } from './live.js';
 import { personFor, faceSVG, coach } from './avatar.js';
 import { stt } from './speech.js';
 import { speechSetup } from './ui.js';
@@ -31,15 +32,20 @@ export function speakTab(page) {
   } else if (seg === 'ai') {
     const info = LLM_MODELS[S.settings.llmModel];
     body += `<div class="hero"><div class="label">Free talk</div><div style="font-size:24px;font-weight:800;margin:6px 0 8px;position:relative;z-index:1">Say anything. Get a real reply.</div>
-      <div style="opacity:.92;position:relative;z-index:1">An unscripted partner who listens, reacts and asks back — like a call with a friend or colleague. It runs entirely on your iPhone, so it works offline and stays private.</div></div><div class="gap"></div>`;
-    if (!llm.supported) body += `<div class="banner w"><div class="badge w">${I.alert}</div><div class="grow"><div class="t">Not available on this device</div><div class="d">Free talk needs iOS 26 or later. Role-plays and everything else work without it.</div></div></div>`;
+      <div style="opacity:.92;position:relative;z-index:1">A partner who listens, reacts and asks back — like a call with a friend. Ask for anything: a chat about your day, a nursery rhyme, a new word, interview practice.</div></div><div class="gap"></div>`;
+    body += `<button class="btn" data-act="livechat">${I.mic} Call ${esc(coach().name)} now</button><div class="gap"></div><button class="btn soft" data-act="two">${I.clock} 2-minute challenge</button><div class="gap"></div>`;
+    if (!hasKey()) body += `<button class="banner tap" data-act="key"><div class="badge">${I.spark}</div><div class="grow"><div class="t">Turn on live talk</div><div class="d">A natural human voice that answers at once. Needs internet and a free Google key.</div></div><span class="chev">${I.chev}</span></button>`;
+    else body += `<p class="muted small center" style="margin-bottom:14px">${navigator.onLine ? 'Live talk is on — natural voice, instant replies.' : 'You are offline, so the on-phone partner will be used.'}</p>`;
+    body += `<div class="sec"><h3>Or pick a scene</h3></div>`;
+    if (hasKey()) { /* live talk covers free conversation; the on-phone model is only the offline fallback */ }
+    else if (!llm.supported) body += `<div class="banner w"><div class="badge w">${I.alert}</div><div class="grow"><div class="t">Not available on this device</div><div class="d">Free talk needs iOS 26 or later. Role-plays and everything else work without it.</div></div></div>`;
     else if (!llm.installed) body += `<button class="banner tap" data-act="getai"><div class="badge">${I.down}</div><div class="grow"><div class="t">Download the free-talk partner · ${info.size}</div><div class="d">One-time download on Wi-Fi. It is a small on-device model, so replies are short and simple.</div></div><span class="chev">${I.chev}</span></button>`;
     body += `<div class="list"><button class="item" data-act="ai" data-id=""><div class="badge">💬</div><div class="grow"><div class="t">Just chat</div><div class="d">Catch up with Maya about your day, plans, work — anything.</div></div><span class="chev">${I.chev}</span></button>
       ${SCENARIOS.map(s => `<button class="item" data-act="ai" data-id="${s.id}"><div class="badge">${s.emoji}</div><div class="grow"><div class="t">${esc(s.title)}<span class="lvl">${s.level}</span></div><div class="d">You: ${esc(s.you)} · with the ${esc(s.partner)}</div></div><span class="chev">${I.chev}</span></button>`).join('')}</div>`;
   } else {
     const list = TOPICS.filter(t => topicCat === 'All' || t.category === topicCat);
     body += `<div class="chips">${tcats.map(c => `<button class="chip ${c === topicCat ? 'on' : ''}" data-act="tcat" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-      <button class="btn soft" data-act="random">${I.swap} Surprise me with a topic</button><div class="gap"></div>
+      <div class="btns"><button class="btn soft" data-act="random">${I.swap} Surprise me</button><button class="btn" data-act="two">${I.clock} 2 minutes</button></div><div class="gap"></div>
       <div class="list">${list.map(t => `<button class="item plain" data-act="topic" data-id="${t.id}"><div class="grow"><div class="t" style="font-weight:560">${esc(t.prompt)}</div><div class="d">${esc(t.category)} · ${t.level}</div></div>${S.done[t.id] ? `<div class="check on">${I.check}</div>` : `<span class="chev">${I.chev}</span>`}</button>`).join('')}</div>`;
   }
   page.el.innerHTML = `<div class="scroll">${body}</div>`;
@@ -49,9 +55,13 @@ export function speakTab(page) {
     cat: b => { cat = b.dataset.c; speakTab(page); },
     tcat: b => { topicCat = b.dataset.c; speakTab(page); },
     open: b => openScenario(b.dataset.id),
-    ai: b => startAI(SCENARIOS.find(s => s.id === b.dataset.id) || null),
+    ai: b => { const sc = SCENARIOS.find(s => s.id === b.dataset.id) || null; if (liveReady()) push(p => liveTalk(p, sc)); else startAI(sc); },
+    livechat: () => talkTo(null),
+    two: () => twoMinutes(),
+    key: () => keySheet(() => speakTab(page)),
     getai: () => aiSetup(() => speakTab(page)),
     topic: b => openTopic(TOPICS.find(t => t.id === b.dataset.id)),
+    two: () => twoMinutes(),
     random: () => openTopic(TOPICS[Math.floor(Math.random() * TOPICS.length)]),
   });
 }
@@ -72,7 +82,7 @@ export function openScenario(id) {
     });
     page.on({
       say: b => speak(b.dataset.text, { gender: who.g }),
-      start: () => withSpeech(() => push(p => conversation(p, s, false))),
+      start: () => talkTo(s),
       ai: () => startAI(s),
     });
   });
@@ -104,6 +114,24 @@ export function aiSetup(done) {
     },
   });
 }
+// Start a conversation the best way available: a live call with a human-sounding partner when the phone
+// is online and a key is set, otherwise the offline scripted partner.
+export function talkTo(scn) {
+  if (liveReady()) return push(p => liveTalk(p, scn));
+  if (!hasKey() && navigator.onLine && !S.settings.keyAsked) {
+    S.settings.keyAsked = true; save();
+    const sh = keySheet(() => push(p => liveTalk(p, scn)));
+    return sh;
+  }
+  if (scn) return withSpeech(() => push(p => conversation(p, scn, false)));
+  startAI(null);
+}
+// The 2-minute challenge: keep talking about one topic for two full minutes.
+export function twoMinutes(topic) {
+  topic = topic || TOPICS[Math.floor(Math.random() * TOPICS.length)];
+  if (liveReady()) return push(p => liveTalk(p, null, { challenge: topic }));
+  openTopic(topic, true);
+}
 // Conversations are voice only, so the speech pack must be there first.
 function withSpeech(go) { if (stt.installed) go(); else speechSetup(go); }
 function startAI(scn) {
@@ -113,23 +141,24 @@ function startAI(scn) {
 }
 
 /* ---------- Topic talk ---------- */
-export function openTopic(t) {
+export function openTopic(t, two) {
   if (!t) return;
   push(page => {
     let result = null;
     const render = () => {
       page.set({
-        title: "Let's talk about…",
+        title: two ? '2-minute challenge' : "Let's talk about…",
         body: `<div class="card" style="margin-top:8px"><div class="tiny b muted" style="text-transform:uppercase;letter-spacing:.06em">${esc(t.category)} · ${t.level}</div>
           <div style="font-size:22px;font-weight:750;line-height:1.25;margin-top:6px" class="sel">${esc(t.prompt)}</div>
           <div class="gap"></div>${t.points.map(p => `<div class="tipline" style="margin-top:6px">${esc(p)}</div>`).join('')}</div>
           <div class="card"><div class="tiny b muted" style="text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">You could start with</div>${t.starters.map(s => `<div class="sel" style="font-size:16px;margin-top:4px">“${esc(s)}”</div>`).join('')}</div>
-          <div class="gap"></div><div class="progress"><i id="tt-bar" style="width:0%"></i></div><p class="muted small center" style="margin-top:8px">Take your time — try to keep going for a minute or two.</p>
+          <div class="gap"></div><div class="progress"><i id="tt-bar" style="width:0%"></i></div><p class="muted small center" style="margin-top:8px">${two ? 'Speak for at least two minutes. Pauses will not stop the clock — I will nudge you to keep going.' : 'Take your time — try to keep going for a minute or two.'}</p>
           <div id="tt-out"></div>`,
       });
       const dock = micDock(page, {
-        hint: 'Tap and tell me about it', maxSec: 120,
-        onTick: s => { const b = page.$('#tt-bar'); if (b) b.style.width = Math.min(100, (s / 120) * 100) + '%'; },
+        hint: two ? 'Tap and talk for two full minutes' : 'Tap and tell me about it', maxSec: two ? 180 : 120, minSec: two ? 120 : 0,
+        nudge: tt => 'Keep going: ' + t.points[Math.floor(tt / 12) % t.points.length],
+        onTick: s => { const b = page.$('#tt-bar'); if (b) { b.style.width = Math.min(100, (s / 120) * 100) + '%'; b.style.background = two && s >= 120 ? 'var(--good)' : ''; } },
         onResult: r => {
           result = analyse(r);
           logSession({ kind: 'Topic talk', title: t.prompt, sec: r.typed ? 0 : r.duration, score: r.typed ? null : result.fl.score, wpm: r.typed ? 0 : result.fl.wpm });
