@@ -1,10 +1,10 @@
 // Offline support. App files are cached on install; the speech engine runtime (from the jsDelivr CDN)
 // is cached the first time it is used. Model files are cached by the speech library itself.
-const VERSION = 'bolo-1.0.1';
+const VERSION = 'bolo-1.1.0';
 const ENGINE = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/ui.js', 'js/store.js', 'js/speech.js', 'js/analysis.js', 'js/home.js', 'js/speak.js', 'js/talk.js', 'js/avatar.js', 'js/practice.js',
+  'js/app.js', 'js/ui.js', 'js/store.js', 'js/speech.js', 'js/analysis.js', 'js/home.js', 'js/speak.js', 'js/talk.js', 'js/live.js', 'js/avatar.js', 'js/practice.js',
   'js/stt-worker.js', 'js/llm-worker.js', 'js/data/scenarios.js', 'js/data/content.js',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
