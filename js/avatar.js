@@ -1,29 +1,40 @@
 // Friendly illustrated conversation partners. Each has a face that blinks, moves its mouth while
 // speaking, looks attentive while you talk, and a voice of the matching gender.
 import { speechEvents, forcedGender } from './speech.js';
+import { S } from './store.js';
 
+export const ACCENTS = {
+  in: { label: 'Indian', adj: 'Indian', city: 'Mumbai' },
+  uk: { label: 'British', adj: 'British', city: 'London' },
+  au: { label: 'Australian', adj: 'Australian', city: 'Sydney' },
+};
+// acc = accent, live = voice name used in live talk
 export const PEOPLE = [
-  { name: 'Maya', g: 'f', skin: '#E3AC84', hair: '#2A1A16', style: 'long', shirt: '#7C4DF2', bg: '#E9E4FF' },
-  { name: 'Arjun', g: 'm', skin: '#D49A6E', hair: '#1E1512', style: 'short', shirt: '#0E9F8E', bg: '#DDF5F0' },
-  { name: 'Sarah', g: 'f', skin: '#F3C9A9', hair: '#8A4B2A', style: 'bob', shirt: '#E0619F', bg: '#FFE6F0' },
-  { name: 'Daniel', g: 'm', skin: '#F0C3A0', hair: '#5A3A22', style: 'side', shirt: '#3B82F6', bg: '#E1EEFF' },
-  { name: 'Priya', g: 'f', skin: '#C98E62', hair: '#1B1210', style: 'bun', shirt: '#F08A3C', bg: '#FFEBD9' },
-  { name: 'James', g: 'm', skin: '#8D5B3E', hair: '#17100D', style: 'short', shirt: '#6D5BD0', bg: '#E8E4FA', beard: true },
-  { name: 'Emma', g: 'f', skin: '#F6D2B8', hair: '#D9A441', style: 'long', shirt: '#12A66A', bg: '#DFF6EA' },
-  { name: 'Tom', g: 'm', skin: '#EFC09B', hair: '#B8632E', style: 'side', shirt: '#E0483E', bg: '#FFE4E1', beard: true },
+  { name: 'Maya', g: 'f', acc: 'in', live: 'Sulafat', skin: '#E3AC84', hair: '#2A1A16', style: 'long', shirt: '#7C4DF2', bg: '#E9E4FF' },
+  { name: 'Arjun', g: 'm', acc: 'in', live: 'Achird', skin: '#D49A6E', hair: '#1E1512', style: 'short', shirt: '#0E9F8E', bg: '#DDF5F0' },
+  { name: 'Priya', g: 'f', acc: 'in', live: 'Leda', skin: '#C98E62', hair: '#1B1210', style: 'bun', shirt: '#F08A3C', bg: '#FFEBD9' },
+  { name: 'Emma', g: 'f', acc: 'uk', live: 'Kore', skin: '#F6D2B8', hair: '#D9A441', style: 'long', shirt: '#12A66A', bg: '#DFF6EA' },
+  { name: 'Daniel', g: 'm', acc: 'uk', live: 'Charon', skin: '#F0C3A0', hair: '#5A3A22', style: 'side', shirt: '#3B82F6', bg: '#E1EEFF' },
+  { name: 'James', g: 'm', acc: 'uk', live: 'Orus', skin: '#8D5B3E', hair: '#17100D', style: 'short', shirt: '#6D5BD0', bg: '#E8E4FA', beard: true },
+  { name: 'Sarah', g: 'f', acc: 'au', live: 'Aoede', skin: '#F3C9A9', hair: '#8A4B2A', style: 'bob', shirt: '#E0619F', bg: '#FFE6F0' },
+  { name: 'Tom', g: 'm', acc: 'au', live: 'Zubenelgenubi', skin: '#EFC09B', hair: '#B8632E', style: 'side', shirt: '#E0483E', bg: '#FFE4E1', beard: true },
 ];
-export const COACH = PEOPLE[0];
 
-// Pick a partner for a scenario. If the learner chose a specific voice, only people of that gender.
+function pool() {
+  const acc = S.settings.accent || 'in';
+  let list = acc === 'any' ? PEOPLE : PEOPLE.filter(p => p.acc === acc);
+  const g = S.settings.partner && S.settings.partner !== 'any' ? S.settings.partner : forcedGender();
+  if (g && list.some(p => p.g === g)) list = list.filter(p => p.g === g);
+  return list;
+}
+// The partner for a scenario: someone with the accent (and gender) the learner chose.
 export function personFor(id) {
-  const g = forcedGender();
-  const pool = g ? PEOPLE.filter(p => p.g === g) : PEOPLE;
-  return pool[[...String(id)].reduce((a, c) => a + c.charCodeAt(0), 0) % pool.length];
+  const list = pool();
+  return list[[...String(id)].reduce((a, c) => a + c.charCodeAt(0), 0) % list.length];
 }
-export function coach() {
-  const g = forcedGender();
-  return g && g !== COACH.g ? PEOPLE.find(p => p.g === g) : COACH;
-}
+// The main coach is the first person in the chosen accent.
+export function coach() { return pool()[0]; }
+export const COACH = PEOPLE[0];
 
 let uid = 0;
 const shade = (hex, k) => '#' + [1, 3, 5].map(i => Math.max(0, Math.min(255, Math.round(parseInt(hex.slice(i, i + 2), 16) * k))).toString(16).padStart(2, '0')).join('');
@@ -62,7 +73,7 @@ export function faceSVG(p, size = 120) {
 }
 
 // Bring a face to life. States: idle | speaking | listening | thinking.
-export function liveFace(host, person, size) {
+export function liveFace(host, person, size, live) {
   host.innerHTML = `<div class="face-wrap"><span class="face-ring"></span>${faceSVG(person, size)}</div>`;
   const wrap = host.firstElementChild;
   const mouth = wrap.querySelector('.f-mouth');
@@ -74,7 +85,7 @@ export function liveFace(host, person, size) {
     mouth.setAttribute('ry', open ? (1.600 + Math.random() * 5).toFixed(1) : 0.400);
     mouth.setAttribute('rx', (5.500 + Math.random() * 2.500).toFixed(1));
   };
-  const onStart = () => { if (state !== 'speaking') return; clearInterval(timer); timer = setInterval(flap, 95); wrap.classList.add('talking'); };
+  const onStart = () => { if (live || state !== 'speaking') return; clearInterval(timer); timer = setInterval(flap, 95); wrap.classList.add('talking'); };
   const onEnd = () => { clearInterval(timer); shut(); wrap.classList.remove('talking'); };
   const onWord = () => { until = Date.now() + 130; };
   speechEvents.addEventListener('start', onStart);
@@ -82,6 +93,8 @@ export function liveFace(host, person, size) {
   speechEvents.addEventListener('boundary', onWord);
   return {
     set(s) { state = s; wrap.dataset.state = s; if (s !== 'speaking') onEnd(); },
+    // Live talk: the mouth follows the real loudness of the voice, moment by moment.
+    mouth(v) { const open = v > 0.04; wrap.classList.toggle('talking', open); mouth.setAttribute('ry', open ? (0.800 + v * 7).toFixed(1) : 0); mouth.setAttribute('rx', (5.500 + Math.min(1, v) * 2.500).toFixed(1)); },
     destroy() { clearInterval(timer); speechEvents.removeEventListener('start', onStart); speechEvents.removeEventListener('end', onEnd); speechEvents.removeEventListener('boundary', onWord); },
   };
 }
