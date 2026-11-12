@@ -4,7 +4,7 @@ const KEY = 'bolo.v1';
 const DEFAULTS = {
   onboarded: false,
   profile: { name: '', level: 'B2', goal: 10 },
-  settings: { voice: '', rate: 1, sttModel: 'onnx-community/whisper-base.en', llmModel: 'onnx-community/Qwen2.5-0.5B-Instruct', hindi: true, autoSpeak: true, handsFree: true, coachEach: false },
+  settings: { voice: '', rate: 1, sttModel: 'onnx-community/whisper-base.en', llmModel: 'onnx-community/Qwen2.5-0.5B-Instruct', hindi: true, autoSpeak: true, handsFree: true, coachEach: false, accent: 'in', partner: 'any', pause: 4, livePause: 2.5, geminiKey: '', liveVariant: 0 },
   packs: { stt: '', llm: '' },
   days: {},        // 'YYYY-MM-DD' -> { sec, sessions, words, wpmSum, wpmN, pronSum, pronN }
   history: [],     // recent sessions: { t, kind, title, sec, score, wpm }
@@ -36,7 +36,7 @@ export function save() {
 }
 export function saveNow() { clearTimeout(timer); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } }
 export function resetAll() { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } S = read(); }
-export function exportData() { return JSON.stringify(S, null, 1); }
+export function exportData() { return JSON.stringify({ ...S, settings: { ...S.settings, geminiKey: '' } }, null, 1); } // the key never leaves the phone in a backup
 export function importData(text) { const d = JSON.parse(text); if (!d || typeof d !== 'object' || !d.profile) throw new Error('Not a backup file'); S = merge(DEFAULTS, d); saveNow(); }
 
 export function dayKey(d = new Date()) {
