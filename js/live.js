@@ -2,14 +2,13 @@
 // Your voice streams to the service, it hears exactly what you said, and answers aloud within about a second.
 // Needs internet and your own Gemini API key (kept only on this phone).
 import { S, save, logPractice, logSession, markDone } from './store.js';
-import { getMic } from './speech.js';
+import { getMic, speak, stopSpeaking } from './speech.js';
 import { $, esc, I, pop, replace, sheet, toast, metricsHTML, issuesHTML, fmtMin } from './ui.js';
 import { checkGrammar, fluency, countFillers, words } from './analysis.js';
 import { liveFace, personFor, coach, ACCENTS } from './avatar.js';
 import { addMistakes } from './store.js';
 
 const WS = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=';
-const MODELS = ['models/gemini-3.8-live', 'models/gemini-3.1-flash-live-preview', 'models/gemini-2.5-flash-native-audio-preview-12-2025'];
 export const hasKey = () => !!(S.settings.geminiKey && S.settings.geminiKey.length > 20);
 export const liveReady = () => hasKey() && navigator.onLine;
 
@@ -26,35 +25,79 @@ function int16FromB64(b64) {
   return new Int16Array(u8.buffer, 0, u8.length >> 1);
 }
 
-// Different message shapes are tried in turn, so a small change on the service side does not break the app.
-function setupMessage(variant, cfg) {
+const REST = 'https://generativelanguage.googleapis.com/v1beta/';
+const key = () => encodeURIComponent(S.settings.geminiKey || '');
+const isQuota = t => /quota|exhaust|rate limit|too many|billing|RESOURCE_EXHAUSTED|429/i.test(t || '');
+const isBadKey = t => /api key not valid|API_KEY_INVALID|invalid api key|PERMISSION_DENIED|unauthenticated/i.test(t || '');
+
+/* ---------- Which models does this key offer? Ask Google, instead of assuming. ---------- */
+let modelCache = null;
+export async function listModels() {
+  if (modelCache) return modelCache;
+  const out = { live: [], chat: [], tts: [], error: '' };
+  try {
+    const r = await fetch(REST + 'models?pageSize=1000&key=' + key());
+    const j = await r.json();
+    if (!r.ok) { out.error = (j.error && j.error.message) || 'HTTP ' + r.status; return out; }
+    const ver = n => { const m = n.match(/(\d+(?:\.\d+)?)/); return m ? +m[1] : 0; };
+    for (const m of j.models || []) {
+      const n = m.name || '', methods = m.supportedGenerationMethods || [];
+      if (methods.includes('bidiGenerateContent') && !/translate|transcribe/i.test(n)) out.live.push(n);
+      else if (/tts/i.test(n) && methods.includes('generateContent')) out.tts.push(n);
+      else if (methods.includes('generateContent') && /flash/i.test(n) && !/tts|image|live|audio|embed|robot|computer|vision|thinking-exp|learnlm/i.test(n)) out.chat.push(n);
+    }
+    // Newest first; within a version the plain "flash" before "lite" (lite has the larger free allowance, so it is the fallback).
+    const order = (a, b) => ver(b) - ver(a) || (/preview|exp/i.test(a) - /preview|exp/i.test(b)) || (/lite/i.test(a) - /lite/i.test(b)) || a.length - b.length;
+    out.live.sort(order); out.chat.sort(order); out.tts.sort(order);
+  } catch (e) { out.error = navigator.onLine ? String(e.message || e) : 'offline'; return out; }
+  modelCache = out;
+  return out;
+}
+export function forgetModels() { modelCache = null; }
+
+async function post(model, body) {
+  const r = await fetch(REST + model + ':generateContent?key=' + key(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* ignore */ }
+  if (!r.ok) { const err = new Error((j && j.error && j.error.message) || 'HTTP ' + r.status); err.status = r.status; throw err; }
+  return j;
+}
+
+function setupMessage(model, shape, cfg) {
   const speech = { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice } } };
-  const vad = { automaticActivityDetection: { startOfSpeechSensitivity: 'START_SENSITIVITY_LOW', endOfSpeechSensitivity: 'END_SENSITIVITY_LOW', prefixPaddingMs: 120, silenceDurationMs: cfg.silenceMs } };
-  const base = { model: MODELS[variant.model], systemInstruction: { parts: [{ text: cfg.system }] } };
-  if (variant.shape === 'flat') Object.assign(base, { responseModalities: ['AUDIO'], speechConfig: speech });
+  const base = { model, systemInstruction: { parts: [{ text: cfg.system }] }, inputAudioTranscription: {}, outputAudioTranscription: {} };
+  if (shape === 'flat') Object.assign(base, { responseModalities: ['AUDIO'], speechConfig: speech });
   else base.generationConfig = { responseModalities: ['AUDIO'], speechConfig: speech };
-  if (variant.extras !== 'min') {
-    base.inputAudioTranscription = {};
-    base.outputAudioTranscription = {};
-    base.realtimeInputConfig = vad;
+  if (shape !== 'min') {
+    base.realtimeInputConfig = { automaticActivityDetection: { startOfSpeechSensitivity: 'START_SENSITIVITY_LOW', endOfSpeechSensitivity: 'END_SENSITIVITY_LOW', prefixPaddingMs: 120, silenceDurationMs: cfg.silenceMs } };
     base.contextWindowCompression = { slidingWindow: {} };
     base.sessionResumption = cfg.handle ? { handle: cfg.handle } : {};
-    if (variant.extras === 'full') base.tools = [{ googleSearch: {} }];
-  } else { base.inputAudioTranscription = {}; base.outputAudioTranscription = {}; }
+    base.tools = [{ googleSearch: {} }];
+  }
   return { setup: base };
 }
-const VARIANTS = [
-  { model: 0, shape: 'gen', extras: 'full' }, { model: 0, shape: 'flat', extras: 'full' }, { model: 0, shape: 'gen', extras: 'nosearch' },
-  { model: 0, shape: 'gen', extras: 'min' }, { model: 1, shape: 'gen', extras: 'full' }, { model: 1, shape: 'gen', extras: 'min' }, { model: 2, shape: 'gen', extras: 'min' },
-];
 
+function wavB64(chunks) {
+  let n = 0; for (const c of chunks) n += c.length;
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+  let o = 44; for (const c of chunks) { for (let i = 0; i < c.length; i++, o += 2) v.setInt16(o, c[i], true); }
+  const u8 = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+// One conversation. It uses the best transport the key allows:
+//   'live'  - real-time streaming voice (fastest, most natural)
+//   'turn'  - you speak, Gemini listens to the recording, replies, and the reply is spoken
 export class LiveSession {
   constructor(cfg, on) {
     this.cfg = cfg; this.on = on;
-    this.state = 'connecting'; this.closed = false; this.ready = false;
-    this.sources = new Set(); this.nextTime = 0; this.userSpeech = 0; this.muted = false;
-    this.noise = 0.02; this.variantIdx = Math.min(S.settings.liveVariant || 0, VARIANTS.length - 1); this.triedAll = 0;
-    this.queue = Promise.resolve();
+    this.state = 'connecting'; this.closed = false; this.ready = false; this.mode = '';
+    this.sources = new Set(); this.nextTime = 0; this.userSpeech = 0; this.muted = false; this.noise = 0.02;
+    this.queue = Promise.resolve(); this.history = []; this.take = []; this.pre = []; this.heard = 0; this.quiet = 0; this.lastErr = '';
   }
   setState(s) { if (this.state !== s) { this.state = s; this.on.state && this.on.state(s); } }
 
@@ -72,66 +115,167 @@ export class LiveSession {
     const sink = this.ctx.createGain(); sink.gain.value = 0;
     this.src.connect(this.node); this.node.connect(sink); sink.connect(this.ctx.destination);
     this.node.onaudioprocess = ev => this.onMic(ev.inputBuffer.getChannelData(0));
-    this.connect();
     const buf = new Float32Array(this.meter.fftSize);
     const tick = () => {
       if (this.closed) return;
-      this.meter.getFloatTimeDomainData(buf);
-      let s = 0; for (let i = 0; i < buf.length; i += 4) s += buf[i] * buf[i];
-      this.on.mouth && this.on.mouth(Math.min(1, Math.sqrt(s / (buf.length / 4)) * 5));
+      if (this.fakeMouth) this.on.mouth && this.on.mouth(Math.random() > 0.25 ? 0.25 + Math.random() * 0.6 : 0.02);
+      else {
+        this.meter.getFloatTimeDomainData(buf);
+        let s = 0; for (let i = 0; i < buf.length; i += 4) s += buf[i] * buf[i];
+        this.on.mouth && this.on.mouth(Math.min(1, Math.sqrt(s / (buf.length / 4)) * 5));
+      }
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+
+    const models = await listModels();
+    if (this.closed) return;
+    if (models.error && isBadKey(models.error)) return this.fail('Google did not accept the key. Check it in Settings. (' + models.error + ')');
+    this.models = models;
+    // Every live model the key lists, then the known names, each in a few message shapes.
+    const live = [...new Set([...(S.settings.liveModel ? [S.settings.liveModel] : []), ...models.live, 'models/gemini-3.8-live', 'models/gemini-3.1-flash-live-preview', 'models/gemini-2.5-flash-native-audio-preview-12-2025'])];
+    this.plan = [];
+    for (const m of live) for (const shape of ['gen', 'min', 'flat']) this.plan.push({ m, shape });
+    this.step = 0;
+    if (S.settings.liveBlocked && Date.now() - S.settings.liveBlocked < 6 * 3600 * 1000 && !this.cfg.forceLive) return this.startTurns(); // refused recently: do not waste time retrying
+    this.connect();
   }
 
+  /* ----- live streaming ----- */
   connect() {
-    const variant = VARIANTS[this.variantIdx];
+    if (this.closed) return;
+    if (this.step >= this.plan.length) { S.settings.liveBlocked = Date.now(); save(); return this.startTurns(); }
+    const { m, shape } = this.plan[this.step];
     let ws;
-    try { ws = new WebSocket(WS + encodeURIComponent(S.settings.geminiKey)); } catch (e) { return this.fail('Could not open the connection.'); }
+    try { ws = new WebSocket(WS + key()); } catch (e) { this.step = this.plan.length; return this.connect(); }
     this.ws = ws; this.ready = false;
-    ws.onopen = () => ws.send(JSON.stringify(setupMessage(variant, { ...this.cfg, handle: this.handle })));
+    ws.onopen = () => ws.send(JSON.stringify(setupMessage(m, shape, { ...this.cfg, handle: this.handle })));
     ws.onmessage = e => { this.queue = this.queue.then(async () => { const t = typeof e.data === 'string' ? e.data : await new Response(e.data).text(); try { this.onMessage(JSON.parse(t)); } catch (err) { /* ignore a malformed frame */ } }); };
     ws.onerror = () => {};
     ws.onclose = e => {
       if (this.closed || ws !== this.ws) return;
-      const why = (e.reason || '').slice(0, 200);
+      const why = (e.reason || '').slice(0, 220);
       if (!this.ready) {
-        if (/api key|API_KEY|permission|unauth|not valid/i.test(why) || e.code === 1008 && /key/i.test(why)) return this.fail('Google did not accept the key. Check it in Settings. (' + why + ')');
-        if (/quota|exhaust|rate|limit/i.test(why)) return this.fail('The free allowance for today is used up, or too many requests. Try again later. (' + why + ')');
-        // This shape was refused: try the next one.
-        if (++this.triedAll < VARIANTS.length) { this.variantIdx = (this.variantIdx + 1) % VARIANTS.length; return this.connect(); }
-        return this.fail('Could not start the call. ' + (why || 'Code ' + e.code) + (navigator.onLine ? '' : ' You seem to be offline.'));
+        this.lastErr = why || 'code ' + e.code;
+        if (isBadKey(why)) return this.fail('Google did not accept the key. Check it in Settings. (' + why + ')');
+        // Out of allowance for this model: skip its other shapes and move to the next model.
+        if (isQuota(why)) { while (this.step < this.plan.length && this.plan[this.step].m === m) this.step++; }
+        else this.step++;
+        return this.connect();
       }
-      // Dropped mid-call (connections last about ten minutes): pick the conversation up again if possible.
       if (this.handle && !this.resumed) { this.resumed = true; this.setState('connecting'); return this.connect(); }
-      this.on.ended && this.on.ended(why);
+      // The live line dropped for good: carry the conversation on in standard mode.
+      this.startTurns(true);
     };
   }
-  fail(msg) { if (this.closed) return; this.on.error && this.on.error(msg); this.stop(); }
 
   onMessage(m) {
     if (m.setupComplete) {
-      this.ready = true; this.resumed = false;
-      if (S.settings.liveVariant !== this.variantIdx) { S.settings.liveVariant = this.variantIdx; save(); }
-      if (!this.greeted) { this.greeted = true; this.sendText(this.cfg.opening || '(The call has just connected. Greet them warmly and start talking.)'); }
+      this.ready = true; this.resumed = false; this.mode = 'live';
+      const used = this.plan[this.step].m;
+      if (S.settings.liveModel !== used || S.settings.liveBlocked) { S.settings.liveModel = used; S.settings.liveBlocked = 0; save(); }
+      this.on.mode && this.on.mode('live', used);
+      if (!this.greeted) { this.greeted = true; this.send({ realtimeInput: { text: this.cfg.opening } }); }
       this.setState('listening');
       return;
     }
     if (m.sessionResumptionUpdate && m.sessionResumptionUpdate.resumable && m.sessionResumptionUpdate.newHandle) this.handle = m.sessionResumptionUpdate.newHandle;
     const sc = m.serverContent;
     if (!sc) return;
-    if (sc.inputTranscription && sc.inputTranscription.text) this.on.userText && this.on.userText(sc.inputTranscription.text);
-    if (sc.outputTranscription && sc.outputTranscription.text) this.on.partnerText && this.on.partnerText(sc.outputTranscription.text);
+    if (sc.inputTranscription && sc.inputTranscription.text) { this.on.userText && this.on.userText(sc.inputTranscription.text); this.history.push({ role: 'user', parts: [{ text: sc.inputTranscription.text }] }); }
+    if (sc.outputTranscription && sc.outputTranscription.text) { this.on.partnerText && this.on.partnerText(sc.outputTranscription.text); this.history.push({ role: 'model', parts: [{ text: sc.outputTranscription.text }] }); }
     if (sc.interrupted) { this.flush(); this.on.partnerDone && this.on.partnerDone(); }
     if (sc.modelTurn && sc.modelTurn.parts) for (const p of sc.modelTurn.parts) {
-      if (p.inlineData && p.inlineData.data) {
-        const rate = +((p.inlineData.mimeType || '').match(/rate=(\d+)/) || [])[1] || 24000;
-        this.play(int16FromB64(p.inlineData.data), rate);
-      }
+      if (p.inlineData && p.inlineData.data) this.play(int16FromB64(p.inlineData.data), +((p.inlineData.mimeType || '').match(/rate=(\d+)/) || [])[1] || 24000);
     }
-    if (sc.turnComplete) { this.turnDone = true; this.on.partnerDone && this.on.partnerDone(); if (!this.sources.size) this.setState('listening'); }
+    if (sc.turnComplete) { this.on.partnerDone && this.on.partnerDone(); if (!this.sources.size) this.setState('listening'); }
   }
 
+  /* ----- standard mode: record a turn, send it, speak the reply ----- */
+  startTurns(midCall) {
+    if (this.closed) return;
+    try { this.ws && this.ws.close(); } catch (e) { /* ignore */ }
+    this.ws = null; this.ready = false; this.mode = 'turn';
+    this.chatIdx = 0; this.ttsIdx = 0; this.ttsOff = !!(S.settings.ttsBlocked && Date.now() - S.settings.ttsBlocked < 6 * 3600 * 1000);
+    this.chat = [...new Set([...(S.settings.chatModel ? [S.settings.chatModel] : []), ...(this.models ? this.models.chat : []), 'models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-2.0-flash'])];
+    this.tts = [...new Set([...(this.models ? this.models.tts : []), 'models/gemini-2.5-flash-preview-tts'])];
+    this.on.mode && this.on.mode('turn', this.lastErr);
+    // History from a dropped live call arrives in small pieces; merge them into whole turns.
+    const merged = [];
+    for (const h of this.history) { const last = merged[merged.length - 1]; if (last && last.role === h.role) last.parts[0].text += h.parts[0].text; else merged.push({ role: h.role, parts: [{ text: h.parts[0].text }] }); }
+    this.history = merged;
+    if (midCall && this.history.length) { this.resetTake(); return this.setState('listening'); }
+    this.ask({ text: this.cfg.opening });
+  }
+  resetTake() { this.take = []; this.pre = []; this.heard = 0; this.quiet = 0; }
+
+  async ask(input) {
+    if (this.closed) return;
+    this.setState('thinking');
+    const userParts = input.audio
+      ? [{ inlineData: { mimeType: 'audio/wav', data: input.audio } }, { text: '(This is a recording of what they just said. Put the exact words they said — word for word, mistakes included, nothing corrected — in "heard", then answer in "reply".)' }]
+      : [{ text: input.text }];
+    if (this.pendingNote) { userParts.push({ text: this.pendingNote }); this.pendingNote = ''; }
+    const body = {
+      systemInstruction: { parts: [{ text: this.cfg.system + ' Answer ONLY with JSON of the form {"heard": "...", "reply": "..."}. "reply" is exactly what you say aloud next, in plain spoken words with no markup. If there was no recording, "heard" is an empty string. If the recording has no clear speech, set "heard" to "" and ask them kindly to say it again.' }] },
+      contents: [...this.history.slice(-16), { role: 'user', parts: userParts }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 700 },
+    };
+    let j = null, err = null;
+    for (; this.chatIdx < this.chat.length; this.chatIdx++) {
+      try { j = await post(this.chat[this.chatIdx], body); break; } catch (e) {
+        err = e;
+        if (isBadKey(e.message)) return this.fail('Google did not accept the key. Check it in Settings. (' + e.message + ')');
+        if (!navigator.onLine) return this.fail('You are offline. Live talk needs internet.');
+      }
+    }
+    if (this.closed) return;
+    if (!j) return this.fail(isQuota(err && err.message)
+      ? 'Google says this key has no allowance left for any of its models right now. Free keys reset daily; a key from a different Google account, or adding billing in Google AI Studio, also fixes it. Until then the offline partner still works. (' + (err.message || '').slice(0, 160) + ')'
+      : 'Could not reach the conversation service. ' + ((err && err.message) || this.lastErr || '').slice(0, 200));
+    if (S.settings.chatModel !== this.chat[this.chatIdx]) { S.settings.chatModel = this.chat[this.chatIdx]; save(); }
+    let text = '';
+    try { text = j.candidates[0].content.parts.map(p => p.text || '').join(''); } catch (e) { /* ignore */ }
+    let heard = '', reply = '';
+    try { const o = JSON.parse(text.replace(/^```(?:json)?|```$/g, '').trim()); heard = (o.heard || '').trim(); reply = (o.reply || '').trim(); } catch (e) { reply = text.replace(/[{}"]/g, ' ').trim(); }
+    if (!reply) reply = 'Sorry, I missed that. Could you say it again?';
+    if (input.audio && heard) { this.on.userText && this.on.userText(heard); this.history.push({ role: 'user', parts: [{ text: heard }] }); }
+    else if (!input.audio) this.history.push({ role: 'user', parts: [{ text: input.text }] });
+    this.history.push({ role: 'model', parts: [{ text: reply }] });
+    this.on.partnerText && this.on.partnerText(reply);
+    this.on.partnerDone && this.on.partnerDone();
+    await this.say(reply);
+  }
+
+  async say(text) {
+    if (this.closed) return;
+    // First choice: a natural Gemini voice. If the key has no allowance for it, the iPhone's own voice.
+    if (!this.ttsOff) {
+      const a = this.cfg.accent ? `Say this in a warm, natural, conversational ${this.cfg.accent} English accent, like a friend on a call: ` : '';
+      for (; this.ttsIdx < this.tts.length; this.ttsIdx++) {
+        try {
+          const j = await post(this.tts[this.ttsIdx], { contents: [{ parts: [{ text: a + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: this.cfg.voice } } } } });
+          const p = j.candidates[0].content.parts.find(x => x.inlineData && x.inlineData.data);
+          if (!p) throw new Error('no audio');
+          if (this.closed) return;
+          this.on.voice && this.on.voice('gemini');
+          this.resetTake();
+          return this.play(int16FromB64(p.inlineData.data), +((p.inlineData.mimeType || '').match(/rate=(\d+)/) || [])[1] || 24000);
+        } catch (e) { this.lastErr = e.message; }
+      }
+      this.ttsOff = true; S.settings.ttsBlocked = Date.now(); save();
+    }
+    if (this.closed) return;
+    this.on.voice && this.on.voice('phone');
+    this.setState('speaking'); this.fakeMouth = true; this.phoneTalking = true;
+    await speak(text, { gender: this.cfg.gender });
+    this.fakeMouth = false; this.phoneTalking = false;
+    if (this.closed) return;
+    this.quietUntil = performance.now() + 300; this.resetTake();
+    this.setState('listening');
+  }
+
+  /* ----- audio out ----- */
   play(int16, rate) {
     if (this.closed || !int16.length) return;
     const buf = this.ctx.createBuffer(1, int16.length, rate);
@@ -141,25 +285,31 @@ export class LiveSession {
     node.buffer = buf; node.connect(this.out);
     const t = Math.max(this.ctx.currentTime + 0.03, this.nextTime);
     node.start(t); this.nextTime = t + buf.duration;
-    this.sources.add(node); this.turnDone = false;
+    this.sources.add(node);
     this.setState('speaking');
-    node.onended = () => { this.sources.delete(node); if (!this.sources.size && !this.closed) { this.quietUntil = performance.now() + 250; this.setState('listening'); } };
+    node.onended = () => { this.sources.delete(node); if (!this.sources.size && !this.closed) { this.quietUntil = performance.now() + 250; this.resetTake(); this.setState('listening'); } };
   }
   flush() { this.sources.forEach(n => { try { n.onended = null; n.stop(); } catch (e) { /* ignore */ } }); this.sources.clear(); this.nextTime = 0; if (!this.closed) this.setState('listening'); }
-  interrupt() { if (this.sources.size) { this.flush(); this.quietUntil = performance.now() + 150; } }
+  interrupt() {
+    if (this.phoneTalking) { stopSpeaking(); return; }
+    if (this.sources.size) { this.flush(); this.quietUntil = performance.now() + 150; this.resetTake(); }
+  }
 
+  /* ----- audio in ----- */
   onMic(data) {
     if (this.closed) return;
     let s = 0; for (let i = 0; i < data.length; i += 8) s += data[i] * data[i];
     const level = Math.sqrt(s / (data.length / 8));
     this.noise = level < this.noise ? level * 0.5 + this.noise * 0.5 : this.noise * 0.995 + level * 0.005;
     const talking = level > Math.max(0.012, this.noise * 2.6);
+    const dur = data.length / this.ctx.sampleRate;
     // While the partner is speaking the mic is held back, so the phone's speaker cannot be mistaken for you.
-    const gated = this.muted || !this.ready || this.sources.size > 0 || performance.now() < (this.quietUntil || 0);
+    const busy = this.sources.size > 0 || this.phoneTalking || performance.now() < (this.quietUntil || 0);
+    const gated = this.muted || busy || (this.mode === 'live' ? !this.ready : this.state !== 'listening');
     this.on.level && this.on.level(gated ? 0 : Math.min(1, level * 8), talking && !gated);
-    if (gated) { if (!this.paused && this.ready) { this.paused = true; this.send({ realtimeInput: { audioStreamEnd: true } }); } return; }
+    if (gated) { if (this.mode === 'live' && !this.paused && this.ready) { this.paused = true; this.send({ realtimeInput: { audioStreamEnd: true } }); } return; }
     this.paused = false;
-    if (talking) this.userSpeech += data.length / this.ctx.sampleRate;
+    if (talking) this.userSpeech += dur;
     const ratio = this.ctx.sampleRate / 16000, n = Math.floor(data.length / ratio), out = new Int16Array(n);
     for (let i = 0; i < n; i++) {
       const a = Math.floor(i * ratio), b = Math.min(data.length, Math.floor((i + 1) * ratio));
@@ -167,18 +317,78 @@ export class LiveSession {
       v = b > a ? v / (b - a) : 0;
       out[i] = Math.max(-1, Math.min(1, v)) * 0x7fff;
     }
-    this.send({ realtimeInput: { audio: { data: b64FromInt16(out), mimeType: 'audio/pcm;rate=16000' } } });
+    if (this.mode === 'live') return this.send({ realtimeInput: { audio: { data: b64FromInt16(out), mimeType: 'audio/pcm;rate=16000' } } });
+    if (this.mode !== 'turn') return;
+    // Standard mode: gather the turn, and take it once they have stopped talking for the chosen pause.
+    if (!this.heard) {
+      this.pre.push(out); if (this.pre.length > 5) this.pre.shift();
+      if (talking) { this.heard = dur; this.take = this.pre.slice(); this.pre = []; this.quiet = 0; }
+      return;
+    }
+    this.take.push(out);
+    if (talking) { this.heard += dur; this.quiet = 0; } else this.quiet += dur;
+    const total = this.take.length * dur;
+    if ((this.quiet * 1000 >= this.cfg.silenceMs && this.heard > 0.35) || total > 110) {
+      const audio = wavB64(this.take);
+      this.resetTake();
+      this.ask({ audio });
+    }
   }
   send(obj) { if (this.ws && this.ws.readyState === 1 && this.ready) this.ws.send(JSON.stringify(obj)); }
-  sendText(text) { this.send({ realtimeInput: { text } }); }
+  sendText(text) { if (this.mode === 'live') this.send({ realtimeInput: { text } }); else if (this.mode === 'turn' && this.state === 'listening') { this.resetTake(); this.ask({ text }); } else this.pendingNote = text; }
+  fail(msg) { if (this.closed) return; this.on.error && this.on.error(msg); this.stop(); }
   stop() {
     if (this.closed) return; this.closed = true;
     cancelAnimationFrame(this.raf);
+    if (this.phoneTalking) stopSpeaking();
     try { this.ws && this.ws.close(); } catch (e) { /* ignore */ }
     this.sources.forEach(n => { try { n.stop(); } catch (e) { /* ignore */ } });
     try { this.node.disconnect(); this.src.disconnect(); } catch (e) { /* ignore */ }
     try { this.ctx.close(); } catch (e) { /* ignore */ }
   }
+}
+
+/* ---------- Key check: what does this key actually allow? ---------- */
+export async function checkKey() {
+  forgetModels();
+  const lines = [];
+  const m = await listModels();
+  if (m.error) return ['Key or connection problem: ' + m.error];
+  lines.push(`Key accepted. Live voice models: ${m.live.length}, chat models: ${m.chat.length}, voice (TTS) models: ${m.tts.length}.`);
+  const short = n => n.replace('models/', '');
+  // Chat
+  let okChat = '';
+  for (const model of m.chat.slice(0, 6)) {
+    try { await post(model, { contents: [{ parts: [{ text: 'Say hi in two words.' }] }], generationConfig: { maxOutputTokens: 20 } }); okChat = model; break; } catch (e) { lines.push(`Chat ${short(model)}: ${isQuota(e.message) ? 'no allowance' : e.message.slice(0, 90)}`); }
+  }
+  lines.push(okChat ? `Chat works: ${short(okChat)}` : 'Chat: no model available on this key.');
+  // Voice
+  let okTts = '';
+  for (const model of m.tts.slice(0, 4)) {
+    try { await post(model, { contents: [{ parts: [{ text: 'Hello.' }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } } }); okTts = model; break; } catch (e) { lines.push(`Voice ${short(model)}: ${isQuota(e.message) ? 'no allowance' : e.message.slice(0, 90)}`); }
+  }
+  lines.push(okTts ? `Natural voice works: ${short(okTts)}` : 'Natural voice: not available, the iPhone voice will be used.');
+  // Live
+  let okLive = '';
+  for (const model of m.live.slice(0, 5)) {
+    const res = await new Promise(resolve => {
+      let done = false; const fin = v => { if (!done) { done = true; resolve(v); } };
+      let ws; try { ws = new WebSocket(WS + key()); } catch (e) { return fin('cannot connect'); }
+      ws.onopen = () => ws.send(JSON.stringify({ setup: { model, generationConfig: { responseModalities: ['AUDIO'] } } }));
+      ws.onmessage = async e => { const t = typeof e.data === 'string' ? e.data : await new Response(e.data).text(); if (/setupComplete/.test(t)) { fin('ok'); ws.close(); } };
+      ws.onclose = e => fin(e.reason || 'closed ' + e.code);
+      setTimeout(() => { fin('no answer'); try { ws.close(); } catch (e) { /* ignore */ } }, 7000);
+    });
+    if (res === 'ok') { okLive = model; break; }
+    lines.push(`Live ${short(model)}: ${isQuota(res) ? 'no allowance' : res.slice(0, 90)}`);
+  }
+  lines.push(okLive ? `Live voice works: ${short(okLive)}` : 'Live voice: not available on this key, standard mode will be used.');
+  if (okLive) { S.settings.liveModel = okLive; S.settings.liveBlocked = 0; } else S.settings.liveBlocked = Date.now();
+  if (okTts) S.settings.ttsBlocked = 0;
+  if (okChat) S.settings.chatModel = okChat;
+  save();
+  lines.push(okLive ? 'Result: full live talk.' : okChat ? (okTts ? 'Result: standard mode with a natural voice.' : 'Result: standard mode with the iPhone voice.') : 'Result: this key cannot be used right now. The offline partner still works.');
+  return lines;
 }
 
 /* ---------- Asking for the key (once) ---------- */
@@ -190,7 +400,7 @@ export function keySheet(done) {
     <div class="gap"></div><button class="btn" data-act="savekey">Save and continue</button><div class="gap"></div>
     <button class="btn ghost" data-act="open">Open the key page</button><div class="gap"></div><button class="btn ghost" data-act="close">Not now</button>
     <p class="muted tiny" style="margin-top:12px">During live talk your voice is sent to Google to be understood and answered. Without a key the app still works offline with scripted partners.</p>`, {
-    savekey: () => { const v = $('#gk', s.el).value.trim(); if (v.length < 20) return toast('That does not look like a full key'); S.settings.geminiKey = v; S.settings.liveVariant = 0; save(); s.close(); toast('Live talk is on'); if (done) done(); },
+    savekey: () => { const v = $('#gk', s.el).value.trim(); if (v.length < 20) return toast('That does not look like a full key'); S.settings.geminiKey = v; S.settings.liveBlocked = 0; S.settings.ttsBlocked = 0; S.settings.liveModel = ''; S.settings.chatModel = ''; forgetModels(); save(); s.close(); toast('Live talk is on'); if (done) done(); },
     open: () => window.open('https://aistudio.google.com/apikey', '_blank'),
   });
 }
@@ -246,10 +456,12 @@ export function liveTalk(page, scn, opts = {}) {
   const closeMe = () => { if (curMe) { curMe.t.text = curMe.t.text.trim(); curMe = null; } };
   const closeThem = () => { if (curThem) { curThem.t.text = curThem.t.text.trim(); curThem = null; } };
 
-  const session = new LiveSession({ system, opening, voice: P.live, silenceMs: challenge ? Math.max(PAUSE(), 3000) : PAUSE() }, {
+  let mode = '';
+  const session = new LiveSession({ system, opening, voice: P.live, accent: ACCENTS[P.acc].adj, gender: P.g, silenceMs: challenge ? Math.max(PAUSE(), 3000) : PAUSE() }, {
+    mode: m => { mode = m; if (m === 'turn') toast('Live voice is not available on your key right now — using standard mode', 4200); },
     state: s => {
       face.set(s === 'speaking' ? 'speaking' : s === 'listening' ? 'listening' : 'thinking');
-      status(s === 'speaking' ? P.name + ' is speaking — tap the face to interrupt' : s === 'listening' ? (session.muted ? 'You are muted' : 'Listening… just talk') : 'Connecting…');
+      status(s === 'speaking' ? P.name + ' is speaking — tap the face to interrupt' : s === 'listening' ? (session.muted ? 'You are muted' : mode === 'turn' ? 'Listening… I answer when you pause' : 'Listening… just talk') : s === 'thinking' ? P.name + ' is thinking…' : 'Calling ' + P.name + '…');
     },
     mouth: v => face.mouth(v),
     level: (v, talking) => {
@@ -259,8 +471,7 @@ export function liveTalk(page, scn, opts = {}) {
     userText: t => { closeThem(); if (!curMe) { const tr = { who: 'me', text: '' }; turns.push(tr); curMe = { t: tr, el: bubble('me', '') }; } curMe.t.text += t; curMe.el.textContent = curMe.t.text; scrollEnd(); },
     partnerText: t => { closeMe(); if (!curThem) { const tr = { who: 'them', text: '' }; turns.push(tr); curThem = { t: tr, el: bubble('them', '') }; } curThem.t.text += t; curThem.el.textContent = curThem.t.text; scrollEnd(); },
     partnerDone: () => closeThem(),
-    error: msg => { if (ended) return; status('Could not connect'); sheet(`<h3>Live talk could not start</h3><p class="muted sel">${esc(msg)}</p><div class="gap"></div><button class="btn" data-act="close">OK</button>`).onClose = () => finish(); },
-    ended: () => { if (!ended) { toast('The call ended'); finish(); } },
+    error: msg => { if (ended) return; status('Could not connect'); sheet(`<h3>Live talk could not start</h3><p class="muted sel">${esc(msg)}</p><div class="gap"></div><button class="btn" data-act="close">OK</button>`).onClose = () => { if (turns.some(t => t.who === 'me' && t.text)) finish(); else { ended = true; pop(); } }; },
   });
   session.start().catch(err => {
     const denied = /denied|NotAllowed/i.test(String(err));
