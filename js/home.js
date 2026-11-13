@@ -6,7 +6,7 @@ import { stt, llm, speak, englishVoices, removePack, STT_MODELS, LLM_MODELS } fr
 import { $, esc, I, push, sheet, toast, confirmSheet, speechSetup, ringHTML, fmtMin, refreshRoot, micDock } from './ui.js';
 import { coach, faceSVG, liveFace } from './avatar.js';
 import { openScenario, scenarioOfDay, planFlag, aiSetup, openTopic, talkTo, twoMinutes } from './speak.js';
-import { hasKey, keySheet } from './live.js';
+import { hasKey, keySheet, checkKey } from './live.js';
 import { ACCENTS } from './avatar.js';
 import { startShadow, flashcards, ALLWORDS } from './practice.js';
 import { TOPICS } from './data/content.js';
@@ -133,6 +133,7 @@ function settingsPage() {
         <div class="sec"><h3>Live talk</h3></div>
         <div class="card"><div class="row"><div class="badge ${hasKey() ? 'g' : ''}">${I.spark}</div><div class="grow"><div class="b">Human-voice partner</div><div class="small muted">${hasKey() ? 'On · key saved on this iPhone' : 'Off · needs a free Google key'}</div></div>
           ${hasKey() ? `<button class="btn danger sm" data-act="rm-key">Remove</button>` : `<button class="btn sm" data-act="add-key">Turn on</button>`}</div>
+          ${hasKey() ? `<div class="gap"></div><button class="btn soft sm" data-act="check-key" style="width:100%">Check what my key allows</button>` : ''}
           <label class="field"><span>Reply after I pause for</span><select id="s-lpause">${[1.5, 2.5, 4, 5].map(v => `<option value="${v}" ${(S.settings.livePause || 2.5) === v ? 'selected' : ''}>${v} seconds</option>`).join('')}</select></label>
           <p class="muted tiny" style="margin-top:10px">Live talk needs internet and sends your voice to Google to be understood and answered. A shorter pause feels quicker; a longer one gives you time to think mid-sentence.</p></div>
         <div class="sec"><h3>Voice</h3></div>
@@ -176,6 +177,12 @@ function settingsPage() {
       acc: b => { S.settings.accent = b.dataset.v; save(); draw(); },
       gender: b => { S.settings.partner = b.dataset.v; save(); draw(); },
       'add-key': () => keySheet(draw),
+      'check-key': async b => {
+        b.disabled = true; b.textContent = 'Checking… about 20 seconds';
+        let lines; try { lines = await checkKey(); } catch (e) { lines = ['Check failed: ' + e.message]; }
+        b.disabled = false; b.textContent = 'Check what my key allows';
+        sheet(`<h3>Your key</h3><div class="card sel">${lines.map(l => `<p style="margin:0 0 8px;font-size:15px">${esc(l)}</p>`).join('')}</div><div class="gap"></div><button class="btn" data-act="close">OK</button>`);
+      },
       'rm-key': async () => { if (await confirmSheet('Turn off live talk?', 'The key is deleted from this iPhone. Conversations go back to the offline partner.', 'Remove key', true)) { S.settings.geminiKey = ''; save(); draw(); } },
       test: () => speak("Hi, it's " + coach().name + ". So, what shall we talk about today?", { gender: coach().g }),
       'get-stt': () => speechSetup(draw),
